@@ -37,9 +37,6 @@ public class ClientListener extends Thread{
 
     private Argon2PasswordEncoder pwHasher = new Argon2PasswordEncoder();
 
-    private FileData currentFile;
-    private FileSender fileSender;
-
     public ClientListener(Server server, Client client) throws Exception {
         this.client = client;
         this.server = server;
@@ -70,13 +67,6 @@ public class ClientListener extends Thread{
             output.writeUTF(salt);
             output.writeUTF(password);
         }
-        client.sendEncrypted(output.toByteArray());
-    }
-
-    public void sendFileStatus(FileStatus status){
-        ByteArrayDataOutput output = ByteStreams.newDataOutput();
-        output.writeUTF("file-status");
-        output.writeUTF(status.name());
         client.sendEncrypted(output.toByteArray());
     }
 
