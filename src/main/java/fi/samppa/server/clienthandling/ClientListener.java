@@ -35,7 +35,7 @@ public class ClientListener extends Thread{
 
     private final DataInputStream dIn;
 
-    private Argon2PasswordEncoder pwHasher = new Argon2PasswordEncoder();
+
 
     public ClientListener(Server server, Client client) throws Exception {
         this.client = client;
@@ -152,7 +152,7 @@ public class ClientListener extends Thread{
         output.writeUTF(data.password);
         output.writeUTF(data.username);
         output.writeUTF(data.site);
-        output.writeUTF(data.uuid.toString());
+        output.writeUTF(data.id.toString());
         client.sendEncrypted(output.toByteArray());
     }
 
@@ -194,7 +194,7 @@ public class ClientListener extends Thread{
                     MainDatabase.UserData data = server.database.fetchUserData(username);
                     if(data == null) continue;
 
-                    String key = server.database.getSessionEncKey(data.getUuid(), sessionID, pwHasher);
+                    String key = server.database.getSessionEncKey(data.getUuid(), sessionID, Main.pwHasher);
 
                     if(key != null){
                         //used to decrypt the encrypted password on the clients side so it can authenticate
@@ -212,7 +212,7 @@ public class ClientListener extends Thread{
                             sendAuthenticationStatus(AuthStatus.FAILED, password, "");
                             continue;
                         }
-                        if(pwHasher.matches(password, data.getCryptographyData().hash)){
+                        if(Main.pwHasher.matches(password, data.getCryptographyData().hash)){
                             authenticateUser(name, password, data);
                             System.out.println("client authenticated as user " + name);
                             sendAuthenticationStatus(AuthStatus.OK, password, data.getCryptographyData().salt);
@@ -226,7 +226,7 @@ public class ClientListener extends Thread{
                     else if(subchannel.equals("registration")){
                         String name = in.readUTF();
                         String password = in.readUTF();
-                        String hash = pwHasher.encode(password);
+                        String hash = Main.pwHasher.encode(password);
 
                         MainDatabase.UserData data = server.database.fetchUserData(name);
                         if(data != null){
@@ -251,7 +251,7 @@ public class ClientListener extends Thread{
                 else if(subchannel.equals("create-session")){
                     String sessionID = in.readUTF();
 
-                    sessionID = pwHasher.encode(sessionID); //hashing it
+                    sessionID = Main.pwHasher.encode(sessionID); //hashing it
                     String newKey = server.database.saveSession(client.getUuid(), sessionID);
                     sendSessionEncKey(client.getCryptographyData().salt, newKey);
                 }
@@ -266,6 +266,7 @@ public class ClientListener extends Thread{
                     String instruction = in.readUTF();
                     if(instruction.equals("send-passwords")){
                         List<MainDatabase.PasswordData> passwords = server.database.getAllUserPasswords(client.getUuid());
+                        System.out.println("found " + passwords.size() + " uuid " + client.getUuid());
                         for(MainDatabase.PasswordData passwordData : passwords){
                             sendPasswordData(passwordData);
                         }

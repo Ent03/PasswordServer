@@ -4,6 +4,7 @@ package fi.samppa.server;
 import fi.samppa.server.clienthandling.Client;
 import fi.samppa.server.clienthandling.ClientListener;
 import fi.samppa.server.config.Config;
+import fi.samppa.server.sql.SQLStorage;
 
 import java.io.IOException;
 import java.net.ServerSocket;
@@ -23,10 +24,9 @@ public class Server extends Thread{
 
     private HashMap<String, Client> users = new HashMap<>();
 
-    public Server(){
+    public Server(MainDatabase mainDatabase){
         config = Config.initConfig(DATA_FOLDER, "config.properties");
-        database = new MainDatabase(Config.initConfig(DATA_FOLDER, "sql.properties"));
-        database.connectToDatabase();
+        this.database = mainDatabase;
     }
 
     public void addUser(String username, Client client){

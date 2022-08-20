@@ -48,32 +48,31 @@ public class MainDatabase extends SQLStorage {
         insertOrUpdate("passwords", "pwid", cNames, cValues, cNames, cValues);
         return new PasswordData(username, password, site, uuid);
     }
-//
-//    public @Nullable PasswordData getPasswordBySite(UUID user, String site){
-//        Connection connection = null;
-//        try {
-//            connection = getConnection();
-//            PreparedStatement statement = connection.prepareStatement("SELECT * FROM passwords WHERE uuid = ? AND site = ?");
-//            statement.setString(1, user.toString());
-//            statement.setString(2, site);
-//            ResultSet rs = statement.executeQuery();
-//            if(!rs.next()) return null;
-//            return new PasswordData(rs.getString("userenc"), rs.getString("pwenc"), rs.getString("site"));
-//        }
-//        catch (SQLException e){
-//            e.printStackTrace();
-//        }
-//        finally {
-//            if(connection != null) {
-//                try {
-//                    closeConnection(connection);
-//                } catch (SQLException e) {
-//                    e.printStackTrace();
-//                }
-//            }
-//        }
-//        return null;
-//    }
+
+    public @Nullable PasswordData getPassword(UUID id){
+        Connection connection = null;
+        try {
+            connection = getConnection();
+            PreparedStatement statement = connection.prepareStatement("SELECT * FROM passwords WHERE pwid = ?");
+            statement.setString(1, id.toString());
+            ResultSet rs = statement.executeQuery();
+            if(!rs.next()) return null;
+            return new PasswordData(rs.getString("userenc"), rs.getString("pwenc"), rs.getString("site"), id);
+        }
+        catch (SQLException e){
+            e.printStackTrace();
+        }
+        finally {
+            if(connection != null) {
+                try {
+                    closeConnection(connection);
+                } catch (SQLException e) {
+                    e.printStackTrace();
+                }
+            }
+        }
+        return null;
+    }
 
     public List<PasswordData> getAllUserPasswords(UUID user){
         Connection connection = null;
@@ -188,11 +187,11 @@ public class MainDatabase extends SQLStorage {
 
     public static class PasswordData{
         public String username, password, site;
-        public UUID uuid;
+        public UUID id;
 
         public PasswordData(String username, String password, String site, UUID uuid) {
             this.username = username;
-            this.uuid = uuid;
+            this.id = uuid;
             this.password = password;
             this.site = site;
         }
