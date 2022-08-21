@@ -22,18 +22,15 @@ public class RestAPIController {
         return token != null && tokens.containsKey(token);
     }
 
-    @GetMapping("/users")
-    public ResponseEntity<?> getUsers(@RequestHeader HttpHeaders headers){
+    @GetMapping("/logout")
+    public ResponseEntity<?> logUserOut(@RequestHeader HttpHeaders headers){
         if(!isAuthorized(headers)) return new ResponseEntity<>(HttpStatus.FORBIDDEN);
-        List<TestObj> users = Arrays.asList(new TestObj("hasdslad"));
-        final HttpHeaders responseHeaders = new HttpHeaders();
-        responseHeaders.add("Access-Control-Expose-Headers", "X-Total-Count");
-        responseHeaders.add("X-Total-Count", String.valueOf(users.size()));
-        return new ResponseEntity<>(users, responseHeaders, HttpStatus.OK);
+        tokens.remove(headers.getFirst("authorization"));
+        return new ResponseEntity<>(HttpStatus.OK);
     }
 
     @GetMapping("/passwords")
-    public ResponseEntity<?> getPasswords(@RequestHeader HttpHeaders headers){
+    public ResponseEntity<?> getPasswords(@RequestHeader HttpHeaders headers, @RequestParam(value = "search", required = false) String search){
         if(!isAuthorized(headers)) return new ResponseEntity<>(HttpStatus.FORBIDDEN);
 
         SessionData sessionData = tokens.get(headers.getFirst("authorization"));
@@ -41,11 +38,16 @@ public class RestAPIController {
         List<MainDatabase.PasswordData> passwordData = Main.database.getAllUserPasswords(userData.getUuid());
 
         //encrypting it here because doing client-side encryption on top of https is pointless
+
         passwordData.forEach(p -> {
             p.password = sessionData.getEncryptor().decrypt(p.password);
             p.site = sessionData.getEncryptor().decrypt(p.site);
             p.username = sessionData.getEncryptor().decrypt(p.username);
         });
+        if(search != null){
+            passwordData.removeIf(p -> !((p.site.startsWith(search) || p.site.endsWith(search))
+            || (p.username.startsWith(search) || p.username.endsWith(search))));
+        }
 
         final HttpHeaders responseHeaders = new HttpHeaders();
         responseHeaders.add("Access-Control-Expose-Headers", "X-Total-Count");
