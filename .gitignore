@@ -1,2 +1,6 @@
 # Project exclude paths
 /target/
+
+#ssl credentials
+/src/main/resources/pserver.jks
+/src/main/resources/application.properties

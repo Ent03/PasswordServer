@@ -43,7 +43,7 @@ public abstract class StorageDriver {
         try {
             Connection connection = getConnection();
             String columns = "(" + String.join(",", columnNames) + ")";
-            String values = StringUtils.repeat("(" + "?,", columnValues.size()-1) + "?)";
+            String values = "(" + StringUtils.repeat( "?,", columnValues.size()-1) + "?)";
 
 
             String insertPart = String.format("INSERT INTO %s %s VALUES %s ", table, columns, values);

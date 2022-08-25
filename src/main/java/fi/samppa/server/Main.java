@@ -26,6 +26,5 @@ public class Main {
         //Starting the REST API
         SpringApplication.run(Main.class, args);
 
-
     }
 }
