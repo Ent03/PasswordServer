@@ -5,6 +5,12 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import fi.samppa.server.logs.LogType;
 import lombok.Data;
 import org.apache.commons.io.FileUtils;
+import org.apache.commons.io.IOUtils;
+import org.apache.tomcat.jni.FileInfo;
+import org.apache.tomcat.util.http.fileupload.FileItemIterator;
+import org.apache.tomcat.util.http.fileupload.FileItemStream;
+import org.apache.tomcat.util.http.fileupload.servlet.ServletFileUpload;
+import org.springframework.context.annotation.Bean;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -13,44 +19,44 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.crypto.encrypt.BytesEncryptor;
 import org.springframework.security.crypto.encrypt.Encryptors;
 import org.springframework.security.crypto.encrypt.TextEncryptor;
+import org.springframework.security.crypto.keygen.KeyGenerators;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.servlet.config.annotation.CorsRegistry;
+import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
+import org.springframework.web.servlet.config.annotation.WebMvcConfigurerAdapter;
 import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import java.io.*;
+import java.nio.file.Files;
 import java.util.*;
 import java.util.stream.Collectors;
 
 @RestController
 @RequestMapping("/api/v1/")
 public class RestAPIController {
+    private final int BLOCK_SIZE = 1024;
+
     private HashMap<String, SessionData> sessions = new HashMap<>();
     private HashMap<String, LoginAttempt> loginAttempts = new HashMap<>();
+
+    private HashMap<String, ShareLink> shareLinks = new HashMap<>();
+
+    private HttpHeaders getResponseHeaders(){
+        HttpHeaders headers = new HttpHeaders();
+        return headers;
+    }
 
     private boolean isAuthorized(HttpHeaders headers){
         String token = headers.getFirst("authorization");
         SessionData sessionData = sessions.get(token);
-        if(sessionData == null) return false;
+        if(sessionData == null) {
+            return false;
+        }
         String ip = headers.getFirst("X-Real-IP");
         return !Main.server.config.getBoolean("production") || sessionData.ipAddr.equals(ip);
-    }
-
-
-    @PostMapping(value = "/files", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public ResponseEntity<?> fileUpload(@RequestHeader HttpHeaders headers, @RequestParam("file") MultipartFile file) throws IOException {
-        if(!isAuthorized(headers)) return new ResponseEntity<>(HttpStatus.FORBIDDEN);
-        SessionData sessionData = getSessionData(headers);
-        String encryptedName = sessionData.getEncryptor().encrypt(file.getOriginalFilename());
-        File convertFile = new File("user_files/"+sessionData.getUserData().getUuid().toString()+"/"+encryptedName);
-        if(!convertFile.exists()){
-            convertFile.getParentFile().mkdirs();
-        }
-        FileOutputStream fout = new FileOutputStream(convertFile);
-        fout.write(sessionData.getFileEncryptor().encrypt(file.getBytes()));
-        fout.close();
-        return new ResponseEntity<>(new FileData(null, file.getName(), file.getSize(), encryptedName), HttpStatus.OK);
     }
 
     @GetMapping("/files/{id}")
@@ -60,7 +66,7 @@ public class RestAPIController {
 
         //File file = new File("user_files/"+sessionData.getUserData().getUuid().toString()+"/"+fileName);
 
-        return new ResponseEntity<>(new FileInfo(fileName,"/api/v1/files/download?name="+fileName), HttpStatus.OK);
+        return new ResponseEntity<>(new FileInfo(fileName,"/api/v1/files/download?name="+fileName), getResponseHeaders(), HttpStatus.OK);
     }
 
     @DeleteMapping("/files/{id}")
@@ -74,89 +80,137 @@ public class RestAPIController {
         }
         file.delete();
 
-        return new ResponseEntity<>(new FileData(null, sessionData.getEncryptor().decrypt(file.getName()), len, fileName), HttpStatus.OK);
+        return new ResponseEntity<>(new FileData(null, sessionData.getEncryptor().decrypt(file.getName()), len, fileName),getResponseHeaders(), HttpStatus.OK);
     }
 
-    @RequestMapping(value = "/files/download2", method = RequestMethod.GET)
-    public ResponseEntity<Object> downloadFile(@RequestHeader HttpHeaders headers, @RequestParam("id") String encryptedName, @RequestParam("token") String token) throws IOException  {
-        headers.add("authorization", token);
-        if(!isAuthorized(headers)) return new ResponseEntity<>(HttpStatus.FORBIDDEN);
-        SessionData sessionData = getSessionData(token);
+    @RequestMapping(value = "/files/share", method = RequestMethod.GET)
+    public ResponseEntity<String> getShareLink(HttpServletResponse response, @RequestHeader HttpHeaders headers,
+                                                                    @RequestParam("id") String encryptedName) throws IOException {
+
+        if (!isAuthorized(headers)) return new ResponseEntity<>(HttpStatus.FORBIDDEN);
+        SessionData sessionData = getSessionData(headers);
         File file = new File("user_files/"+sessionData.getUserData().getUuid().toString()+"/"+encryptedName);
-        byte[] bytes = new FileInputStream(file).readAllBytes();
-        bytes = sessionData.getFileEncryptor().decrypt(bytes);
-        HttpHeaders responseHeaders = new HttpHeaders();
-
-        ByteArrayResource resource = new ByteArrayResource(bytes);
-
-        responseHeaders.add("Content-Disposition", String.format("attachment; filename=\"%s\"", file.getName()));
-//        responseHeaders.add("Cache-Control", "no-cache, no-store, must-revalidate");
-//        responseHeaders.add("Pragma", "no-cache");
-//        responseHeaders.add("Expires", "0");
-
-            return ResponseEntity.ok()
-                .headers(responseHeaders)
-                .contentLength(bytes.length)
-                .contentType(MediaType.APPLICATION_OCTET_STREAM)
-                .body(resource);
+        String id = KeyGenerators.string().generateKey();
+        shareLinks.put(id, new ShareLink(file, sessionData));
+        return new ResponseEntity<>(id, getResponseHeaders(),HttpStatus.OK);
     }
+
+    @RequestMapping(value = "/files/shared", method = RequestMethod.GET)
+    public ResponseEntity<StreamingResponseBody> getSharedFile(HttpServletResponse response,
+                                                               @RequestParam("id") String shareId,
+                                                               @RequestParam("download") boolean download) throws IOException  {
+        if(!shareLinks.containsKey(shareId)) return new ResponseEntity<>(HttpStatus.FORBIDDEN);
+
+        ShareLink shareLink = shareLinks.get(shareId);
+        File file = shareLink.file;
+
+        String fileName = shareLink.sessionData.getEncryptor().decrypt(file.getName());
+
+        if(download) response.addHeader("Content-Disposition", String.format("attachment; filename=\"%s\"", fileName));
+
+        FileInputStream inputStream = new FileInputStream(file);
+        StreamingResponseBody stream = out ->{
+            byte[] data=new byte[BLOCK_SIZE+32];
+            int length;
+            while ((length=inputStream.read(data)) >= 0){
+                byte[] actual = new byte[length];
+                for(int i = 0; i < length; i++){
+                    actual[i] = data[i];
+                }
+
+                byte[] decrypted = shareLink.sessionData.getFileEncryptor().decrypt(actual);
+                out.write(decrypted);
+            }
+        };
+        return new ResponseEntity<>(stream, getResponseHeaders(), HttpStatus.OK);
+    }
+
 
     @RequestMapping(value = "/files/download", method = RequestMethod.GET)
     public ResponseEntity<StreamingResponseBody> downloadFileChunks(HttpServletResponse response, @RequestHeader HttpHeaders headers,
-                                                                    @RequestParam("id") String encryptedName, @RequestParam("token") String token) throws IOException  {
+                                                                    @RequestParam("id") String encryptedName, @RequestParam("token") String token,
+                                                                    @RequestParam("download") boolean download) throws IOException  {
         headers.add("authorization", token);
         if(!isAuthorized(headers)) return new ResponseEntity<>(HttpStatus.FORBIDDEN);
         SessionData sessionData = getSessionData(token);
         File file = new File("user_files/"+sessionData.getUserData().getUuid().toString()+"/"+encryptedName);
-        byte[] bytes = new FileInputStream(file).readAllBytes();
-        bytes = sessionData.getFileEncryptor().decrypt(bytes);
 
         String fileName = sessionData.getEncryptor().decrypt(file.getName());
-        ByteArrayResource resource = new ByteArrayResource(bytes);
 
-        response.addHeader("Content-Disposition", String.format("attachment; filename=\"%s\"", fileName));
+        if(download) response.addHeader("Content-Disposition", String.format("attachment; filename=\"%s\"", fileName));
 //        responseHeaders.add("Cache-Control", "no-cache, no-store, must-revalidate");
 //        responseHeaders.add("Pragma", "no-cache");
 //        responseHeaders.add("Expires", "0");
 
 
-        InputStream inputStream = new ByteArrayInputStream(bytes);
+        FileInputStream inputStream = new FileInputStream(file);
         StreamingResponseBody stream = out ->{
-            byte[] data=new byte[16384];
+            byte[] data=new byte[BLOCK_SIZE+32];
             int length;
             while ((length=inputStream.read(data)) >= 0){
-                out.write(data, 0, length);
+                byte[] actual = new byte[length];
+                for(int i = 0; i < length; i++){
+                    actual[i] = data[i];
+                }
+
+                byte[] decrypted = sessionData.getFileEncryptor().decrypt(actual);
+                out.write(decrypted);
             }
         };
-        return ResponseEntity.ok().contentLength(bytes.length).body(stream);
+        return  new ResponseEntity<>(stream, getResponseHeaders(), HttpStatus.OK);
     }
 
-    @RequestMapping(value = "/files/view", method = RequestMethod.GET)
-    public ResponseEntity<StreamingResponseBody> viewFile(@RequestHeader HttpHeaders headers,
-            @RequestParam("id") String encryptedName, @RequestParam("token") String token) throws IOException  {
-        headers.add("authorization", token);
+    @PostMapping(value = "/files", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<?> fileUploadNew(HttpServletRequest request, @RequestHeader HttpHeaders headers) throws IOException {
         if(!isAuthorized(headers)) return new ResponseEntity<>(HttpStatus.FORBIDDEN);
-        SessionData sessionData = getSessionData(token);
-        File file = new File("user_files/"+sessionData.getUserData().getUuid().toString()+"/"+encryptedName);
-        byte[] bytes = new FileInputStream(file).readAllBytes();
-        bytes = sessionData.getFileEncryptor().decrypt(bytes);
+        SessionData sessionData = getSessionData(headers);
+        ServletFileUpload upload = new ServletFileUpload();
 
-        InputStream inputStream = new ByteArrayInputStream(bytes);
-        StreamingResponseBody stream = out ->{
-            byte[] data=new byte[16384];
-            int length;
-            while ((length=inputStream.read(data)) >= 0){
-                out.write(data, 0, length);
-            }
-        };
-        return ResponseEntity.ok().contentLength(bytes.length).body(stream);
+        FileItemIterator iterator = upload.getItemIterator(request);
+
+        if(!iterator.hasNext()) return new ResponseEntity<>(HttpStatus.BAD_REQUEST);
+
+        FileItemStream item = iterator.next();
+        String encryptedName = sessionData.getEncryptor().encrypt(item.getName());
+        InputStream inputStream = item.openStream();
+
+        encryptFile(inputStream, sessionData, encryptedName);
+
+        return new ResponseEntity<>(new FileData(null, item.getName(), request.getContentLength(), encryptedName), getResponseHeaders(),HttpStatus.OK);
+    }
+
+    private void encryptFile(InputStream inputStream, SessionData sessionData, String encryptedName) throws IOException {
+        File tempFile = new File("temp_files/"+sessionData.getUserData().getUuid()+"/"+encryptedName);
+        if(!tempFile.exists()){
+            tempFile.getParentFile().mkdirs();
+        }
+        FileOutputStream fileOutputStream = new FileOutputStream(tempFile);
+
+        byte[] data=new byte[BLOCK_SIZE];
+        int length;
+        while ((length = inputStream.read(data)) >= 0){
+            fileOutputStream.write(data, 0, length);
+        }
+        fileOutputStream.close();
+        FileInputStream fileInputStream = new FileInputStream(tempFile);
+        //encrypting it, it's not possible to do it above because the actual data read might not be exact
+        File file = new File("user_files/"+sessionData.getUserData().getUuid()+"/"+encryptedName);
+        if(!file.exists()) file.getParentFile().mkdirs();
+        fileOutputStream = new FileOutputStream(file);
+        byte[] data2 = new byte[BLOCK_SIZE];
+        while ((fileInputStream.read(data2)) >= 0){
+            byte[] encrypted = sessionData.getFileEncryptor().encrypt(data2);
+            fileOutputStream.write(encrypted);
+        }
+        fileOutputStream.close();
+        tempFile.delete();
     }
 
     @GetMapping("/logout")
     public ResponseEntity<?> logUserOut(@RequestHeader HttpHeaders headers){
         if(!isAuthorized(headers)) return new ResponseEntity<>(HttpStatus.FORBIDDEN);
         sessions.remove(headers.getFirst("authorization"));
-        return new ResponseEntity<>(HttpStatus.OK);
+        return new ResponseEntity<>(getResponseHeaders(),HttpStatus.OK);
     }
 
     private boolean searchContains(String search, String query){
@@ -192,6 +246,24 @@ public class RestAPIController {
                 FileUtils.copyFile(file.file, new File(file.file.getParentFile(), newName));
                 file.file.delete();
             }
+
+            FileInputStream inputStream = null;
+            try {
+                inputStream = new FileInputStream(file.file);
+                int size = (int) (file.file.length() < BLOCK_SIZE ? file.file.length() : BLOCK_SIZE+32);
+                byte[] data = new byte[size];
+                inputStream.read(data);
+                sessionData.getFileEncryptor().decrypt(data); //if this throws bad padding error, start migration
+            }
+            catch (Exception e){
+                //migrating, encrypted the old way
+                try {
+                    ByteArrayInputStream byteArrayInputStream = new ByteArrayInputStream(sessionData.fileEncryptor.decrypt(Files.readAllBytes(file.file.toPath())));
+                    encryptFile(byteArrayInputStream, sessionData, file.id);
+                }
+                catch (Exception ignored){
+                }
+            }
         }
 
         int ogSize = fileData.size();
@@ -209,7 +281,7 @@ public class RestAPIController {
             else if(index++ < start || index > end) dataIterator.remove();
         }
         ogSize = ogSize - removed;
-        final HttpHeaders responseHeaders = new HttpHeaders();
+        final HttpHeaders responseHeaders = getResponseHeaders();
         responseHeaders.add("Access-Control-Expose-Headers", "X-Total-Count");
         responseHeaders.add("X-Total-Count", String.valueOf(ogSize));
         return new ResponseEntity<>(fileData, responseHeaders, HttpStatus.OK);
@@ -240,7 +312,7 @@ public class RestAPIController {
             else if(index++ < start || index > end) dataIterator.remove();
         }
         ogSize = ogSize - removed;
-        final HttpHeaders responseHeaders = new HttpHeaders();
+        final HttpHeaders responseHeaders = getResponseHeaders();
         responseHeaders.add("Access-Control-Expose-Headers", "X-Total-Count");
         responseHeaders.add("X-Total-Count", String.valueOf(ogSize));
 
@@ -283,18 +355,19 @@ public class RestAPIController {
         Main.database.addLog(getSessionData(headers).getUserData().getUuid(), LogType.PASSWORD_REQUEST,
                 request.getRequestURI() + "?search="+search, request.getHeader("X-Real-IP"));
 
-        final HttpHeaders responseHeaders = new HttpHeaders();
+        final HttpHeaders responseHeaders = getResponseHeaders();
         responseHeaders.add("Access-Control-Expose-Headers", "X-Total-Count");
         responseHeaders.add("X-Total-Count", String.valueOf(ogSize));
         return new ResponseEntity<>(passwordData, responseHeaders, HttpStatus.OK);
     }
 
     @PostMapping("/authenticate")
-    public ResponseEntity<?> authenticateUser(@RequestHeader HttpHeaders headers, @RequestBody AuthData user){
+    public ResponseEntity<?> authenticateUser(HttpServletRequest request, @RequestHeader HttpHeaders headers, @RequestBody AuthData user){
         MainDatabase.UserData data = Main.database.fetchUserData(user.getUsername());
-        if(data == null) return new ResponseEntity<>(HttpStatus.UNAUTHORIZED);
+        if(data == null) return new ResponseEntity<>(getResponseHeaders(), HttpStatus.UNAUTHORIZED);
 
         String ip = headers.getFirst("X-Real-IP");
+        if(ip == null) ip = request.getRemoteAddr();
         if(!loginAttempts.containsKey(user.getUsername())){
             loginAttempts.put(user.getUsername(), new LoginAttempt());
         }
@@ -304,13 +377,13 @@ public class RestAPIController {
                 Main.database.addLog(data.getUuid(), LogType.AUTHENTICATION, String.format("Maximum login attempts reached (%s)", tries), ip);
                 //locking it
                 Server.logger.warning("Someone is trying to brute force account " +  user.getUsername() + ", tries = " + tries);
-                return new ResponseEntity<>(HttpStatus.UNAUTHORIZED);
+                return new ResponseEntity<>(getResponseHeaders(),HttpStatus.UNAUTHORIZED);
             }
         }
 
         if(!Main.pwHasher.matches(user.password, data.getCryptographyData().hash)){
             Main.database.addLog(data.getUuid(), LogType.AUTHENTICATION, "Failed Login", ip);
-            return new ResponseEntity<>(HttpStatus.UNAUTHORIZED);
+            return new ResponseEntity<>(getResponseHeaders(),HttpStatus.UNAUTHORIZED);
         }
         Main.database.addLog(data.getUuid(), LogType.AUTHENTICATION, "Successful Login", ip);
         loginAttempts.remove(user.getUsername());
@@ -318,7 +391,7 @@ public class RestAPIController {
         String token = UUID.randomUUID().toString();
         sessions.put(token, new SessionData(data, Encryptors.text(user.getPassword(), data.getCryptographyData().salt),
                 Encryptors.standard(user.getPassword(), data.getCryptographyData().salt), ip));
-        return ResponseEntity.ok(token);
+        return new ResponseEntity<>(token, getResponseHeaders(), HttpStatus.OK);
     }
 
     private SessionData getSessionData(HttpHeaders headers){
@@ -340,7 +413,7 @@ public class RestAPIController {
         Main.database.addLog(getSessionData(headers).getUserData().getUuid(), LogType.PASSWORD_DELETE,
                 "Site: " + sessionData.getEncryptor().decrypt(passwordData.site), headers.getFirst("X-Real-IP"));
 
-        return ResponseEntity.ok(passwordData);
+        return new ResponseEntity<>(passwordData, getResponseHeaders(), HttpStatus.OK);
     }
 
     @PostMapping("/passwords")
@@ -356,7 +429,7 @@ public class RestAPIController {
         Main.database.addLog(getSessionData(headers).getUserData().getUuid(), LogType.PASSWORD_CREATE,
                 "Site: " + data.site, headers.getFirst("X-Real-IP"));
 
-        return new ResponseEntity<>(passwordData, HttpStatus.OK);
+        return new ResponseEntity<>(passwordData, getResponseHeaders(), HttpStatus.OK);
     }
 
     @PostMapping("/register")
@@ -366,9 +439,19 @@ public class RestAPIController {
             return new ResponseEntity<>(HttpStatus.CONFLICT);
         }
         Main.database.saveUser(user.getUsername(), Main.pwHasher.encode(user.getPassword()));
-        return new ResponseEntity<>(Arrays.asList(user), HttpStatus.OK);
+        return new ResponseEntity<>(Arrays.asList(user), getResponseHeaders(), HttpStatus.OK);
     }
 
+
+    static class ShareLink{
+        private File file;
+        private SessionData sessionData;
+
+        public ShareLink(File file, SessionData sessionData) {
+            this.file = file;
+            this.sessionData = sessionData;
+        }
+    }
 
     @Data
     static class LoginAttempt{
